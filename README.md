@@ -180,6 +180,65 @@ oscillation periods, so the cell relaxes without overshooting.
 `P_int = −sigma`, where `sigma = atoms.get_stress(voigt=False, include_ideal_gas=True)`.
 This is the **negative** of ASE's default stress convention.
 
+## Validation
+
+Errors are block-averaging standard errors; σ is the deviation from the reference in units
+of that error.
+
+### Ideal gas against the exact result
+
+ASE's `IdealGas` calculator (32 Ar atoms, 300 K, 5 fs timestep, `tdamp = 20 dt`,
+`pdamp = 100 dt`, 300k steps) has an exact NPT volume distribution
+p(V) ∝ Vᴺ exp(−P₀V/kT) for both the isotropic and the fully flexible cell, so
+⟨V⟩ = (N+1)kT/P₀ = 1000 Å³ and std(V) = √(N+1) kT/P₀ = 174.1 Å³. This exercises the
+full MD step (thermostat, half kicks, momentum rescaling, kinetic pressure).
+
+| Barostat | ⟨V⟩ (Å³) | std(V) (Å³) |
+|---|---|---|
+| `BussiSCR` (4 seeds) | 1004.5 ± 2.5 (+1.8σ) | 173.0 ± 1.4 (−0.8σ) |
+| `BussiSCR(isotropic=True)` | 999.9 ± 5.2 (0.0σ) | 177.6 ± 3.4 (+1.0σ) |
+| ASE `IsotropicMTKNPT` | 998.4 ± 0.7 (−2.4σ) | 173.5 ± 2.5 (−0.3σ) |
+| ASE `MTKNPT` | 998.8 ± 0.7 (−1.8σ) | 180.5 ± 7.0 (+0.9σ) |
+
+The flexible-cell mean may sit up to ~0.5 % high at this short `pdamp`, consistent with the
+τ_p-dependent integration error reported for the anisotropic integrator in Ref. [1]
+(Fig. 3.1); it is not statistically conclusive.
+
+### Cell-only model against Monte Carlo
+
+The barostat step alone, driven by an elastic cell energy U = (K/2)‖hᵀh − G₀‖² plus an
+average kinetic pressure NkT/V (N = 4, which makes the kT/V corrections large), samples
+p(h) ∝ Vᴺ⁻² exp(−(U + P₀V)/kT) (Ref. [1], Eq. 2.2). 800k barostat steps at
+`pdamp = 50 dt` compared with Metropolis Monte Carlo of the same density
+(G = hᵀh):
+
+| Compressibility | ⟨V⟩ | ⟨G_xy²⟩ | ⟨(G_xx − G_zz)²⟩ |
+|---|---|---|---|
+| Monte Carlo reference | 26.262 ± 0.003 | 0.2532 ± 0.0005 | 1.018 ± 0.002 |
+| scalar β | 26.285 ± 0.026 | 0.258 ± 0.004 | 1.046 ± 0.017 |
+| β with 5× shear elements | 26.255 ± 0.031 | 0.257 ± 0.002 | 1.014 ± 0.016 |
+| unequal diagonal β (now rejected) | 26.267 ± 0.024 | 0.250 ± 0.004 | 1.102 ± 0.017 (+5σ) |
+
+With `isotropic=True` the cell shape stays fixed and the volume matches the exact
+one-dimensional distribution p(V) ∝ Vᴺ exp(−(U(V) + P₀V)/kT): ⟨V⟩ = 26.863 ± 0.027
+against 26.891 (−1.1σ), ⟨V²⟩ = 724.9 ± 1.4 against 726.4 (−1.0σ).
+
+### Cu (EMT) against ASE's MTK barostats
+
+108 Cu atoms, 600 K, 1 GPa, 2 fs timestep, `pdamp = 100 dt`, 75k sampled steps:
+
+| Barostat | ⟨V/atom⟩ (Å³) | std(V/atom) (Å³) |
+|---|---|---|
+| `BussiSCR` | 11.909 ± 0.005 | 0.088 ± 0.002 |
+| `BussiSCR(isotropic=True)` | 11.916 ± 0.005 | 0.091 ± 0.003 |
+| ASE `IsotropicMTKNPT` | 11.910 ± 0.002 | 0.093 ± 0.003 |
+| ASE `MTKNPT` | 11.918 ± 0.002 | 0.120 ± 0.004 |
+
+All mean volumes agree. For a cubic crystal the volume spread should not depend on
+whether the shape can change; both SCR variants and `IsotropicMTKNPT` agree on it. Given
+that `MTKNPT` reproduces the exact ideal-gas spread, its larger value here most likely
+reflects slow convergence of its nine-variable cell dynamics rather than a wrong ensemble.
+
 ## References
 
 [1] V. Del Tatto, *A Fully Anisotropic Formulation of Stochastic Cell Rescaling*,
