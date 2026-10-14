@@ -62,8 +62,9 @@ class BussiSCR(VelocityVerlet):
         Integration timestep in ASE time units.
     temperature_K : float
         Target temperature in Kelvin.
-    stress_au : scalar, (6,) array, or (3,3) array
-        Target stress in eV/Ang^3 using the *pressure* convention
+    pressure_au : scalar, (6,) array, or (3,3) array
+        Target pressure in eV/Ang^3, as in :class:`~ase.md.nose_hoover_chain.MTKNPT`.
+        A tensor gives a target stress, using the *pressure* convention
         (compressive positive).  Note this is the *negative* of ASE's stress
         tensor convention (``atoms.get_stress`` returns compressive-negative).
 
@@ -75,14 +76,17 @@ class BussiSCR(VelocityVerlet):
           full symmetric stress tensor in Voigt notation.
         * **(3,3) array** — full symmetric stress tensor.
 
-    taut : float
-        Bussi thermostat time constant in ASE time units.
-    taup : float
-        Barostat relaxation time constant in ASE time units.
+    tdamp : float
+        Characteristic time scale of the Bussi thermostat (its relaxation
+        time) in ASE time units.  Typically 100 times ``timestep``.
+    pdamp : float
+        Characteristic time scale of the barostat (the SCR relaxation time
+        tau_p of the volume) in ASE time units.  Typically 1000 times
+        ``timestep``.
     compressibility_au : scalar, (6,) array, or (3,3) array
         Isothermal compressibility of the system in Ang^3/eV.
 
-        Three forms are accepted (same as ``stress_au``):
+        Three forms are accepted (same as ``pressure_au``):
 
         * **scalar** — isotropic compressibility; used uniformly for all
           nine components, i.e. ``scalar * np.ones((3, 3))`` (the original
@@ -127,7 +131,7 @@ class BussiSCR(VelocityVerlet):
         where sigma = atoms.get_stress(voigt=False, include_ideal_gas=True)
 
     So P_int[i,i] > 0 means the system is under compression along axis i.
-    ``stress_au`` follows the same convention.
+    ``pressure_au`` follows the same convention.
 
     SCR equation
     ~~~~~~~~~~~~
@@ -137,8 +141,8 @@ class BussiSCR(VelocityVerlet):
              + sqrt(2 beta_T k_BT / (3 V tau_p)) dW h
 
     where h is the box matrix (columns = cell vectors), beta_T is the
-    isothermal compressibility, tau_p the barostat time constant, P_target
-    the target stress tensor (= ``stress_au``), P_int the instantaneous
+    isothermal compressibility, tau_p the barostat time constant (= ``pdamp``),
+    P_target the target stress tensor (= ``pressure_au``), P_int the instantaneous
     internal pressure tensor, V the volume, and dW a 3x3 matrix of
     independent Wiener increments.
 
@@ -152,7 +156,7 @@ class BussiSCR(VelocityVerlet):
     off-diagonal (shear) elements only change relaxation rates, not the
     sampled ensemble.
 
-    A non-hydrostatic ``stress_au`` is applied as a constant target Cauchy
+    A non-hydrostatic ``pressure_au`` is applied as a constant target Cauchy
     stress, not via the reference-cell strain energy (h Sigma h^T) / V of
     Ref. [1]_, Eq. 2.20.  The two agree at the reference cell and differ at
     finite strain.
@@ -170,9 +174,9 @@ class BussiSCR(VelocityVerlet):
         atoms,
         timestep,
         temperature_K,
-        stress_au,
-        taut,
-        taup,
+        pressure_au,
+        tdamp,
+        pdamp,
         compressibility_au,
         rng=None,
         **kwargs,
@@ -182,11 +186,11 @@ class BussiSCR(VelocityVerlet):
             atoms,
             timestep,
             temperature_K=temperature_K,
-            taut=taut,
+            taut=tdamp,
             rng=rng,
         )
-        self.taup = taup
-        self.stress = self._parse_symmetric_tensor(stress_au, "stress_au")
+        self.pdamp = pdamp
+        self.set_pressure(pressure_au)
         self.compressibility_mat = self._parse_compressibility(compressibility_au)
         # Share the rng instance that Bussi resolved (handles rng=None case)
         self.rng = self.thermostat.rng
@@ -238,17 +242,17 @@ class BussiSCR(VelocityVerlet):
             )
         return beta
 
-    def set_taup(self, taup):
-        self.taup = taup
+    def set_pdamp(self, pdamp):
+        self.pdamp = pdamp
 
-    def get_taup(self):
-        return self.taup
+    def get_pdamp(self):
+        return self.pdamp
 
-    def set_stress(self, stress_au):
-        self.stress = self._parse_symmetric_tensor(stress_au, "stress_au")
+    def set_pressure(self, pressure_au):
+        self.pressure = self._parse_symmetric_tensor(pressure_au, "pressure_au")
 
-    def get_stress(self):
-        return self.stress
+    def get_pressure(self):
+        return self.pressure
 
     def set_compressibility(self, compressibility_au):
         self.compressibility_mat = self._parse_compressibility(compressibility_au)
@@ -293,9 +297,9 @@ class BussiSCR(VelocityVerlet):
         k_bt   = self.thermostat.temp
         # Isotropic mean compressibility for the volume DOF
         beta_t = np.trace(self.compressibility_mat) / 3.0
-        tau_p  = self.taup
-        # target mean pressure = Tr(stress) / 3 (pressure convention)
-        p0_scalar = np.trace(self.stress) / 3.0
+        tau_p  = self.pdamp
+        # target mean pressure = Tr(P_target) / 3 (pressure convention)
+        p0_scalar = np.trace(self.pressure) / 3.0
         vol = lam * lam
 
         # Deterministic drift (Eq. 1.108b, dt -> dt/2)
@@ -324,7 +328,7 @@ class BussiSCR(VelocityVerlet):
         atoms  = self.atoms
         dt     = self.dt
         k_bt   = self.thermostat.temp   # eV
-        tau_p  = self.taup
+        tau_p  = self.pdamp
 
         # ---- Current state ----
         vol = atoms.get_volume()    # Ang^3
@@ -346,7 +350,7 @@ class BussiSCR(VelocityVerlet):
 
         # ---- Deterministic drift matrix A (traceless part) ----
         # A_ij = -(beta_ij / (3 tau_p)) (P_target - P_int)_ij
-        a_mat = -(beta_mat / (3.0 * tau_p)) * (self.stress - p_int)
+        a_mat = -(beta_mat / (3.0 * tau_p)) * (self.pressure - p_int)
         a_traceless = a_mat - (np.trace(a_mat) / 3.0) * np.eye(3)
 
         # ================================================================
