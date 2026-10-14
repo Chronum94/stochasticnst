@@ -81,10 +81,14 @@ class BussiSCR(VelocityVerlet):
         Three forms are accepted (same as ``stress_au``):
 
         * **scalar** — isotropic compressibility; used uniformly for all
-          components (the original formulation of Ref. [1]_).
+          nine components, i.e. ``scalar * np.ones((3, 3))`` (the original
+          formulation of Ref. [1]_, Eq. 2.17).
         * **(6,) Voigt array** ``[β_xx, β_yy, β_zz, β_yz, β_xz, β_xy]`` —
           full symmetric compressibility tensor in Voigt notation.
         * **(3,3) array** — full symmetric compressibility tensor.
+
+        The diagonal elements must be equal (see Notes).  A zero
+        off-diagonal element freezes that shear component.
 
         The compressibility tensor controls the per-component coupling strength
         between the internal pressure deviation and the cell update rate:
@@ -137,7 +141,12 @@ class BussiSCR(VelocityVerlet):
     When a compressibility *tensor* beta_ij is provided, the scalar beta_T
     in the above is replaced element-wise: the coupling strength for
     component (i,j) becomes beta_ij / tau_p, and the noise amplitude scales
-    as sqrt(beta_ij) to maintain the fluctuation-dissipation balance.
+    as sqrt(beta_ij) (Ref. [1]_, Eq. 2.55).  The diagonal elements must be
+    equal: otherwise the volume and shape noise are correlated, which the
+    independent volume/shape steps of Algorithm 7 cannot reproduce, and the
+    sampled shape distribution is biased.  With equal diagonal elements the
+    off-diagonal (shear) elements only change relaxation rates, not the
+    sampled ensemble.
 
     Box rotations are eliminated by symmetrising both the deterministic drift
     (P_int -> (P_int + P_int.T) / 2) and the noise before computing the
@@ -169,7 +178,7 @@ class BussiSCR(VelocityVerlet):
         )
         self.taup = taup
         self.stress = self._parse_symmetric_tensor(stress_au, "stress_au")
-        self.compressibility_mat = self._parse_symmetric_tensor(compressibility_au, "compressibility_au")
+        self.compressibility_mat = self._parse_compressibility(compressibility_au)
         # Share the rng instance that Bussi resolved (handles rng=None case)
         self.rng = self.thermostat.rng
 
@@ -197,6 +206,29 @@ class BussiSCR(VelocityVerlet):
             f"got shape {v.shape}"
         )
 
+    @classmethod
+    def _parse_compressibility(cls, value):
+        """Return the (3,3) compressibility matrix used element-wise in the barostat.
+
+        A scalar couples all nine components (beta * ones, Ref. [1]_ Eq. 2.17);
+        beta * eye would zero every shear drift and noise term.
+        """
+        v = np.asarray(value, dtype=float)
+        if v.ndim == 0:
+            beta = float(v) * np.ones((3, 3))
+        else:
+            beta = cls._parse_symmetric_tensor(v, "compressibility_au")
+        if not np.allclose(beta, beta.T):
+            raise ValueError("compressibility_au must be symmetric")
+        if np.any(beta < 0):
+            raise ValueError("compressibility_au must be non-negative")
+        if not np.allclose(np.diag(beta), beta[0, 0]):
+            raise ValueError(
+                "compressibility_au must have equal diagonal elements; unequal "
+                "values bias the sampled cell shape distribution"
+            )
+        return beta
+
     def set_taup(self, taup):
         self.taup = taup
 
@@ -210,9 +242,7 @@ class BussiSCR(VelocityVerlet):
         return self.stress
 
     def set_compressibility(self, compressibility_au):
-        self.compressibility_mat = self._parse_symmetric_tensor(
-            compressibility_au, "compressibility_au"
-        )
+        self.compressibility_mat = self._parse_compressibility(compressibility_au)
 
     def get_compressibility(self):
         return self.compressibility_mat
@@ -299,7 +329,7 @@ class BussiSCR(VelocityVerlet):
         p_int_scalar = np.trace(p_int) / 3.0   # isotropic part
 
         # ---- Element-wise compressibility matrix for the shape step ----
-        # For a scalar compressibility this is beta_T * eye(3) and the
+        # For a scalar compressibility this is beta_T * ones((3,3)) and the
         # equations reduce exactly to Ref. [1]_.  For a tensor, each (i,j)
         # component couples with its own strength beta_ij / tau_p while the
         # fluctuation-dissipation balance is maintained per-component.
@@ -323,19 +353,15 @@ class BussiSCR(VelocityVerlet):
         # For uniform beta this reduces to the original scalar b_dt * ones.
         b_mat = np.sqrt(2.0 * beta_mat * k_bt / (3.0 * vol1 * tau_p) * dt)
 
-        # 3x3 Gaussian noise for shape.  Symmetrise and make traceless so
-        # that delta_eps stays in sl(3) (the Lie algebra of volume-preserving
-        # transformations).  b_mat * w2 is already symmetric (product of two
-        # symmetric matrices element-wise) and traceless when the diagonal
-        # elements of b_mat are equal — which holds whenever the diagonal
-        # elements of compressibility_mat are equal.  For fully anisotropic
-        # diagonal compressibility an explicit re-projection is applied.
+        # 3x3 Gaussian noise for shape, symmetrised (no rotations) and made
+        # traceless so that delta_eps stays in sl(3) (volume-preserving).
+        # b_mat * w2 is symmetric, and removing its trace is independent of
+        # the volume noise because the diagonal of b_mat is uniform (enforced
+        # in _parse_compressibility).
         w2 = self.rng.standard_normal((3, 3))
         w2 = 0.5 * (w2 + w2.T)
-        w2 -= (np.trace(w2) / 3.0) * np.eye(3)
 
         noise = b_mat * w2
-        noise = 0.5 * (noise + noise.T)
         noise -= (np.trace(noise) / 3.0) * np.eye(3)
 
         # Argument of the matrix exponential  (Ref. [1]_, Eq. 2.39, generalised)
