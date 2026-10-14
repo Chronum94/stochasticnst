@@ -398,27 +398,30 @@ class BussiSCR(VelocityVerlet):
         atoms.set_momenta(momenta @ np.linalg.inv(mu))
 
     def step(self, forces=None):
-        """Move one timestep forward using SCR NPT + Bussi NVT dynamics."""
+        """Move one timestep forward using SCR NPT + Bussi NVT dynamics.
+
+        Follows Algorithm 8 of Ref. [1]_: the barostat acts between the
+        velocity-Verlet half kick and the drift, so the stress is taken where
+        forces are already known and there is one force evaluation per step.
+        """
+        atoms = self.atoms
+
         # Apply Bussi stochastic velocity rescaling (thermostat)
         self.thermostat.scale_velocities()
-
-        # Apply SCR barostat (cell + position + momentum rescaling)
-        self.scale_positions_and_cell()
-
-        # Velocity Verlet integration
-        atoms = self.atoms
 
         if forces is None:
             forces = atoms.get_forces(md=True)
 
-        p = atoms.get_momenta()
-        p += 0.5 * self.dt * forces
+        atoms.set_momenta(atoms.get_momenta() + 0.5 * self.dt * forces)
 
+        # Apply SCR barostat (cell + position + momentum rescaling)
+        self.scale_positions_and_cell()
+
+        p = atoms.get_momenta()
         atoms.set_positions(
             atoms.get_positions() + self.dt * p / atoms.get_masses()[:, np.newaxis]
         )
 
-        atoms.set_momenta(p)
         forces = atoms.get_forces(md=True)
         atoms.set_momenta(atoms.get_momenta() + 0.5 * self.dt * forces)
 
