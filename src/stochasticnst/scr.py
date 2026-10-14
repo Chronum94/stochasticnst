@@ -117,6 +117,14 @@ class BussiSCR(VelocityVerlet):
     rng : numpy.random.Generator or None, optional
         Random number generator shared by both the thermostat and barostat.
         Defaults to ``numpy.random``.
+    isotropic : bool, optional
+        If True, rescale the cell isotropically: only the volume fluctuates
+        and the cell shape is fixed (isotropic SCR, Ref. [2]_), as in ASE's
+        ``IsotropicMTKNPT``.  Use this for liquids, whose zero shear
+        stiffness otherwise lets the cell shape random-walk until the box
+        degenerates.  Requires a hydrostatic ``pressure_au``; the
+        compressibility enters only as ``Tr(beta)/3``.  Default False (fully
+        flexible cell, as in ``MTKNPT``).
     **kwargs
         Additional keyword arguments passed to
         :class:`~ase.md.verlet.VelocityVerlet`.
@@ -167,6 +175,10 @@ class BussiSCR(VelocityVerlet):
 
     The matrix exponential for the shape step is computed with
     ``scipy.linalg.expm``.
+
+    See Also
+    --------
+    IsotropicBussiSCR : ``BussiSCR`` with ``isotropic=True``.
     """
 
     def __init__(
@@ -179,6 +191,7 @@ class BussiSCR(VelocityVerlet):
         pdamp,
         compressibility_au,
         rng=None,
+        isotropic=False,
         **kwargs,
     ):
         VelocityVerlet.__init__(self, atoms, timestep, **kwargs)
@@ -190,6 +203,7 @@ class BussiSCR(VelocityVerlet):
             rng=rng,
         )
         self.pdamp = pdamp
+        self.isotropic = isotropic
         self.set_pressure(pressure_au)
         self.compressibility_mat = self._parse_compressibility(compressibility_au)
         # Share the rng instance that Bussi resolved (handles rng=None case)
@@ -249,7 +263,13 @@ class BussiSCR(VelocityVerlet):
         return self.pdamp
 
     def set_pressure(self, pressure_au):
-        self.pressure = self._parse_symmetric_tensor(pressure_au, "pressure_au")
+        pressure = self._parse_symmetric_tensor(pressure_au, "pressure_au")
+        if self.isotropic and not np.allclose(pressure, pressure[0, 0] * np.eye(3)):
+            raise ValueError(
+                "isotropic=True only responds to the mean pressure; "
+                "pressure_au must be hydrostatic"
+            )
+        self.pressure = pressure
 
     def get_pressure(self):
         return self.pressure
@@ -361,27 +381,31 @@ class BussiSCR(VelocityVerlet):
 
         # ================================================================
         # Step 2: shape full-step with b evaluated at intermediate volume vol1
+        # (skipped when isotropic: isotropic SCR, Ref. [2]_)
         # ================================================================
-        # Element-wise noise amplitude: b_ij = sqrt(2 beta_ij k_BT / (3 V1 tau_p) dt)
-        # For uniform beta this reduces to the original scalar b_dt * ones.
-        b_mat = np.sqrt(2.0 * beta_mat * k_bt / (3.0 * vol1 * tau_p) * dt)
+        if self.isotropic:
+            mu_s = np.eye(3)
+        else:
+            # Element-wise noise amplitude: b_ij = sqrt(2 beta_ij k_BT / (3 V1 tau_p) dt)
+            # For uniform beta this reduces to the original scalar b_dt * ones.
+            b_mat = np.sqrt(2.0 * beta_mat * k_bt / (3.0 * vol1 * tau_p) * dt)
 
-        # 3x3 Gaussian noise for shape, symmetrised (no rotations) and made
-        # traceless so that delta_eps stays in sl(3) (volume-preserving).
-        # b_mat * w2 is symmetric, and removing its trace is independent of
-        # the volume noise because the diagonal of b_mat is uniform (enforced
-        # in _parse_compressibility).
-        w2 = self.rng.standard_normal((3, 3))
-        w2 = 0.5 * (w2 + w2.T)
+            # 3x3 Gaussian noise for shape, symmetrised (no rotations) and made
+            # traceless so that delta_eps stays in sl(3) (volume-preserving).
+            # b_mat * w2 is symmetric, and removing its trace is independent of
+            # the volume noise because the diagonal of b_mat is uniform (enforced
+            # in _parse_compressibility).
+            w2 = self.rng.standard_normal((3, 3))
+            w2 = 0.5 * (w2 + w2.T)
 
-        noise = b_mat * w2
-        noise -= (np.trace(noise) / 3.0) * np.eye(3)
+            noise = b_mat * w2
+            noise -= (np.trace(noise) / 3.0) * np.eye(3)
 
-        # Argument of the matrix exponential  (Ref. [1]_, Eq. 2.39, generalised)
-        delta_eps = a_traceless * dt + noise
+            # Argument of the matrix exponential  (Ref. [1]_, Eq. 2.39, generalised)
+            delta_eps = a_traceless * dt + noise
 
-        # Matrix exponential -> shape rescaling matrix (det = 1)
-        mu_s = expm(delta_eps)
+            # Matrix exponential -> shape rescaling matrix (det = 1)
+            mu_s = expm(delta_eps)
 
         # ================================================================
         # Step 3: volume half-step
@@ -439,3 +463,14 @@ class BussiSCR(VelocityVerlet):
         atoms.set_momenta(atoms.get_momenta() + 0.5 * self.dt * forces)
 
         return forces
+
+
+class IsotropicBussiSCR(BussiSCR):
+    """Isotropic SCR NPT molecular dynamics: ``BussiSCR(..., isotropic=True)``.
+
+    Provided for parity with ASE's ``IsotropicMTKNPT`` / ``MTKNPT`` pair.
+    Only the volume fluctuates; the cell shape is fixed (Ref. [2]_).
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, isotropic=True, **kwargs)
