@@ -2,7 +2,7 @@
 
 Anisotropic Stochastic Cell Rescaling (SCR) NPT barostat for [ASE](https://wiki.fysik.dtu.dk/ase/).
 
-Implements the fully anisotropic formulation of Del Tao (2021) with a time-reversible
+Implements the fully anisotropic formulation of Del Tatto (2021) with a time-reversible
 Trotterized integrator, extended to support a per-component compressibility tensor for
 independent coupling of shear and diagonal degrees of freedom.
 
@@ -21,8 +21,10 @@ where `h` is the cell matrix, `β` the isothermal compressibility, `τ_p` the ba
 time constant, and `dW` a matrix of Wiener increments.
 
 The compressibility can be supplied as a scalar (isotropic, recovering Ref. [1]) or as a
-full 3×3 symmetric tensor, allowing stronger coupling for shear components — reducing
-their autocorrelation time without affecting the volume coupling or the sampled ensemble.
+symmetric tensor applied element-wise (Ref. [1], Eq. 2.55), allowing stronger coupling for
+shear components — reducing their autocorrelation time without affecting the volume
+coupling or the sampled ensemble. The diagonal elements of the tensor must be equal;
+unequal diagonal values would bias the sampled cell shape and are rejected.
 
 ## Installation
 
@@ -44,7 +46,7 @@ import ase.build
 import ase.units
 from ase.calculators.emt import EMT
 from ase.md.velocitydistribution import MaxwellBoltzmannDistribution, Stationary
-from stochasticnst import BussiSCR
+from stochasticnst import BussiSCR, IsotropicBussiSCR
 
 # Build system
 atoms = ase.build.bulk("Cu", crystalstructure="fcc", a=3.63).repeat((4, 4, 4))
@@ -63,16 +65,40 @@ md = BussiSCR(
     timestep=timestep,
     temperature_K=300.0,
     pressure_au=1.0 * ase.units.GPa,
-    taut=100 * timestep,
-    taup=1000 * timestep,
+    tdamp=100 * timestep,
+    pdamp=1000 * timestep,
     compressibility_au=compressibility,
 )
 md.run(10_000)
 ```
 
+### Isotropic cell fluctuations (liquids)
+
+A liquid has no shear stiffness, so in a fully flexible cell its shape random-walks until
+the box collapses into a slab or needle. Pass `isotropic=True` to rescale the cell
+isotropically: only the volume fluctuates and the shape stays fixed (the isotropic SCR of
+Ref. [2]). This requires a hydrostatic `pressure_au`. `IsotropicBussiSCR` is the same thing
+as a class, mirroring ASE's `IsotropicMTKNPT`.
+
+```python
+md = BussiSCR(
+    atoms,
+    timestep=timestep,
+    temperature_K=300.0,
+    pressure_au=1.0 * ase.units.GPa,
+    tdamp=100 * timestep,
+    pdamp=1000 * timestep,
+    compressibility_au=compressibility,
+    isotropic=True,
+)
+```
+
 ### Anisotropic target pressure
 
-Pass a symmetric 3×3 pressure tensor (eV/Å³, compressive-positive convention):
+Pass a symmetric 3×3 (or Voigt (6,)) target stress tensor (eV/Å³, compressive-positive
+convention). It is applied as a constant target Cauchy stress; Ref. [1] instead uses a
+reference-cell strain energy (Eq. 2.20), which agrees at the reference cell but differs at
+finite strain.
 
 ```python
 P_target = np.array([
@@ -85,10 +111,9 @@ md = BussiSCR(
     atoms,
     timestep=timestep,
     temperature_K=300.0,
-    pressure_au=0.0,                        # overridden by tensor
-    pressure_tensor_au=P_target,
-    taut=100 * timestep,
-    taup=1000 * timestep,
+    pressure_au=P_target,
+    tdamp=100 * timestep,
+    pdamp=1000 * timestep,
     compressibility_au=compressibility,
 )
 ```
@@ -114,42 +139,54 @@ md = BussiSCR(
     atoms,
     timestep=timestep,
     temperature_K=300.0,
-    pressure_au=0.0,
-    pressure_tensor_au=P_target,
-    taut=100 * timestep,
-    taup=1000 * timestep,
+    pressure_au=P_target,
+    tdamp=100 * timestep,
+    pdamp=1000 * timestep,
     compressibility_au=compressibility_tensor,
 )
 ```
 
-Or pass a full 3×3 array for complete control.
+Or pass a full 3×3 array for complete control. A zero off-diagonal element freezes that
+shear component.
 
 ## API
 
-### `BussiSCR`
+### `BussiSCR` / `IsotropicBussiSCR`
+
+Keywords follow ASE's `MTKNPT` / `IsotropicMTKNPT` where they overlap
+(`temperature_K`, `pressure_au`, `tdamp`, `pdamp`, `**kwargs` to `MolecularDynamics`), so
+switching barostats is mostly a matter of changing the class and adding
+`compressibility_au`. `BussiSCR` is the fully flexible cell (like `MTKNPT`);
+`isotropic=True`, or equivalently `IsotropicBussiSCR`, rescales the cell isotropically
+(like `IsotropicMTKNPT`). Unlike MTK,
+`tdamp` and `pdamp` are relaxation times of first-order stochastic dynamics rather than
+oscillation periods, so the cell relaxes without overshooting.
 
 | Parameter | Type | Description |
 |---|---|---|
 | `atoms` | `Atoms` | ASE Atoms object with attached calculator |
 | `timestep` | `float` | Timestep in ASE time units |
 | `temperature_K` | `float` | Target temperature (K) |
-| `pressure_au` | `float` | Target isotropic pressure (eV/Å³) |
-| `taut` | `float` | Bussi thermostat time constant (ASE time units) |
-| `taup` | `float` | Barostat relaxation time constant (ASE time units) |
-| `compressibility_au` | scalar, (6,), or (3,3) | Isothermal compressibility (Å³/eV) |
-| `pressure_tensor_au` | (3,3) array or None | Anisotropic target pressure tensor (eV/Å³); overrides `pressure_au` |
+| `pressure_au` | scalar, (6,), or (3,3) | Target pressure (eV/Å³, compressive-positive); a tensor gives a target stress (`BussiSCR` only) |
+| `tdamp` | `float` | Bussi thermostat relaxation time (ASE time units), typically 100 × `timestep` |
+| `pdamp` | `float` | Barostat relaxation time (ASE time units), typically 1000 × `timestep` |
+| `compressibility_au` | scalar, (6,), or (3,3) | Isothermal compressibility (Å³/eV); diagonal elements must be equal |
 | `rng` | `Generator` or None | NumPy random generator (shared with thermostat) |
+| `isotropic` | `bool` | Volume-only rescaling, fixed cell shape (like `IsotropicMTKNPT`); default `False`. `IsotropicBussiSCR` sets it to `True` |
 
 ## Pressure convention
 
-`pressure_au` and `pressure_tensor_au` use the **compressive-positive** convention:
+`pressure_au` uses the **compressive-positive** convention, as in ASE's MTK barostats:
 `P_int = −sigma`, where `sigma = atoms.get_stress(voigt=False, include_ideal_gas=True)`.
 This is the **negative** of ASE's default stress convention.
 
 ## References
 
-[1] V. Del Tao, *A Fully Anisotropic Formulation of Stochastic Cell Rescaling*,
+[1] V. Del Tatto, *A Fully Anisotropic Formulation of Stochastic Cell Rescaling*,
     Master's Thesis, University of Trento (2021). <https://arxiv.org/abs/2111.06402>
 
 [2] M. Bernetti and G. Bussi, *Pressure control using stochastic cell rescaling*,
     J. Chem. Phys. **153**, 114107 (2020). <https://doi.org/10.1063/5.0020514>
+
+[3] G. Bussi, D. Donadio and M. Parrinello, *Canonical sampling through velocity
+    rescaling*, J. Chem. Phys. **126**, 014101 (2007). <https://doi.org/10.1063/1.2408420>
