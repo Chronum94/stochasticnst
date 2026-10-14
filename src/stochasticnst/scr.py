@@ -6,13 +6,17 @@ Anisotropic formulation with time-reversible integrator.
 
 References
 ----------
-.. [1] V. Del Tao, "A Fully Anisotropic Formulation of Stochastic Cell
+.. [1] V. Del Tatto, "A Fully Anisotropic Formulation of Stochastic Cell
        Rescaling", Master's Thesis, University of Trento (2021),
        https://arxiv.org/abs/2111.06402
 
 .. [2] M. Bernetti and G. Bussi, "Pressure control using stochastic cell
        rescaling", J. Chem. Phys. 153, 114107 (2020),
        https://doi.org/10.1063/5.0020514
+
+.. [3] G. Bussi, D. Donadio and M. Parrinello, "Canonical sampling through
+       velocity rescaling", J. Chem. Phys. 126, 014101 (2007),
+       https://doi.org/10.1063/1.2408420
 """
 
 import numpy as np
@@ -27,7 +31,7 @@ class BussiSCR(VelocityVerlet):
 
     Samples the isothermal-isobaric (NPT) ensemble using the anisotropic SCR
     barostat [1]_ combined with the Bussi stochastic velocity rescaling
-    thermostat [2]_.
+    thermostat [3]_.
 
     The barostat propagates the simulation cell via a first-order stochastic
     equation that is the high-friction limit of the Parrinello-Rahman equations
@@ -147,6 +151,11 @@ class BussiSCR(VelocityVerlet):
     sampled shape distribution is biased.  With equal diagonal elements the
     off-diagonal (shear) elements only change relaxation rates, not the
     sampled ensemble.
+
+    A non-hydrostatic ``stress_au`` is applied as a constant target Cauchy
+    stress, not via the reference-cell strain energy (h Sigma h^T) / V of
+    Ref. [1]_, Eq. 2.20.  The two agree at the reference cell and differ at
+    finite strain.
 
     Box rotations are eliminated by symmetrising both the deterministic drift
     (P_int -> (P_int + P_int.T) / 2) and the noise before computing the
